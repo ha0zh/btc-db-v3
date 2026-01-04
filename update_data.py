@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
 BTC OHLC Data Updater
-Fetches latest hourly candles from Binance Futures API and updates the CSV file.
+Fetches latest hourly candles from multiple API sources with fallback.
 Designed to run via GitHub Actions every hour.
+
+API Priority:
+1. Bybit API (no geo-restrictions)
+2. OKX API (no geo-restrictions)
+3. CryptoCompare API (free, global)
 """
 
 import requests
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 import sys
 
 # Configuration
 CSV_FILE = 'BTC_OHLC_1h_gmt8_updated.csv'
-BINANCE_API_URL = "https://fapi.binance.com/fapi/v1/klines"
-SYMBOL = 'BTCUSDT'
-INTERVAL = '1h'
 LIMIT = 100  # Fetch last 100 candles to ensure overlap
 
 def log(message):
@@ -37,33 +39,40 @@ def get_latest_timestamp_from_csv(csv_file):
         log(f"❌ Error reading CSV: {e}")
         return None, None
 
-def fetch_recent_klines(limit=100):
+def fetch_from_bybit(limit=100):
     """
-    Fetch the most recent klines from Binance Futures API
-    No API key required - uses public endpoints
+    Fetch from Bybit API (no geo-restrictions)
+    https://bybit-exchange.github.io/docs/v5/market/kline
     """
+    url = "https://api.bybit.com/v5/market/kline"
+    
     params = {
-        'symbol': SYMBOL,
-        'interval': INTERVAL,
+        'category': 'spot',
+        'symbol': 'BTCUSDT',
+        'interval': '60',  # 60 minutes = 1 hour
         'limit': limit
     }
     
     try:
-        log(f"Fetching {limit} most recent klines from Binance API...")
-        response = requests.get(BINANCE_API_URL, params=params, timeout=30)
+        log("Trying Bybit API...")
+        response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         
         data = response.json()
         
-        if not data:
-            log("⚠ No data returned from API")
+        if data.get('retCode') != 0:
+            log(f"⚠ Bybit API error: {data.get('retMsg')}")
             return None
         
-        # Convert to DataFrame
-        df = pd.DataFrame(data, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+        klines = data.get('result', {}).get('list', [])
+        
+        if not klines:
+            log("⚠ No data returned from Bybit")
+            return None
+        
+        # Bybit returns: [startTime, openPrice, highPrice, lowPrice, closePrice, volume, turnover]
+        df = pd.DataFrame(klines, columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume', 'turnover'
         ])
         
         # Convert timestamp to datetime (UTC)
@@ -72,27 +81,172 @@ def fetch_recent_klines(limit=100):
         # Convert to GMT+8 (Asia/Singapore timezone)
         df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Singapore').dt.tz_localize(None)
         
-        # Select and rename columns to match existing format
+        # Select columns
         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
         
-        # Convert price columns to float
+        # Convert to float
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # Set timestamp as index
+        # Sort by timestamp (Bybit returns newest first)
+        df = df.sort_values('timestamp')
         df.set_index('timestamp', inplace=True)
         
-        log(f"✓ Fetched {len(df)} rows from API")
+        log(f"✓ Bybit: Fetched {len(df)} rows")
         log(f"  Date range: {df.index.min()} to {df.index.max()}")
         
         return df
         
-    except requests.exceptions.RequestException as e:
-        log(f"❌ API request failed: {e}")
-        return None
     except Exception as e:
-        log(f"❌ Error processing API response: {e}")
+        log(f"⚠ Bybit failed: {e}")
         return None
+
+def fetch_from_cryptocompare(limit=100):
+    """
+    Fetch from CryptoCompare API (free, no geo-restrictions)
+    https://min-api.cryptocompare.com/
+    """
+    url = "https://min-api.cryptocompare.com/data/v2/histohour"
+    
+    params = {
+        'fsym': 'BTC',
+        'tsym': 'USDT',
+        'limit': limit,
+        'e': 'binance'  # Use Binance as exchange reference
+    }
+    
+    try:
+        log("Trying CryptoCompare API...")
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data.get('Response') != 'Success':
+            log(f"⚠ CryptoCompare error: {data.get('Message')}")
+            return None
+        
+        klines = data.get('Data', {}).get('Data', [])
+        
+        if not klines:
+            log("⚠ No data returned from CryptoCompare")
+            return None
+        
+        df = pd.DataFrame(klines)
+        
+        # Convert timestamp
+        df['timestamp'] = pd.to_datetime(df['time'], unit='s', utc=True)
+        
+        # Convert to GMT+8
+        df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Singapore').dt.tz_localize(None)
+        
+        # Rename columns
+        df = df.rename(columns={
+            'open': 'open',
+            'high': 'high', 
+            'low': 'low',
+            'close': 'close',
+            'volumefrom': 'volume'
+        })
+        
+        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
+        
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        df.set_index('timestamp', inplace=True)
+        df = df.sort_index()
+        
+        log(f"✓ CryptoCompare: Fetched {len(df)} rows")
+        log(f"  Date range: {df.index.min()} to {df.index.max()}")
+        
+        return df
+        
+    except Exception as e:
+        log(f"⚠ CryptoCompare failed: {e}")
+        return None
+
+def fetch_from_okx(limit=100):
+    """
+    Fetch from OKX API (no geo-restrictions for market data)
+    https://www.okx.com/docs-v5/en/
+    """
+    url = "https://www.okx.com/api/v5/market/candles"
+    
+    params = {
+        'instId': 'BTC-USDT',
+        'bar': '1H',
+        'limit': str(limit)
+    }
+    
+    try:
+        log("Trying OKX API...")
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data.get('code') != '0':
+            log(f"⚠ OKX error: {data.get('msg')}")
+            return None
+        
+        klines = data.get('data', [])
+        
+        if not klines:
+            log("⚠ No data returned from OKX")
+            return None
+        
+        # OKX returns: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        df = pd.DataFrame(klines, columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume', 
+            'volCcy', 'volCcyQuote', 'confirm'
+        ])
+        
+        # Convert timestamp
+        df['timestamp'] = pd.to_datetime(df['open_time'].astype(int), unit='ms', utc=True)
+        
+        # Convert to GMT+8
+        df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Singapore').dt.tz_localize(None)
+        
+        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
+        
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Sort (OKX returns newest first)
+        df = df.sort_values('timestamp')
+        df.set_index('timestamp', inplace=True)
+        
+        log(f"✓ OKX: Fetched {len(df)} rows")
+        log(f"  Date range: {df.index.min()} to {df.index.max()}")
+        
+        return df
+        
+    except Exception as e:
+        log(f"⚠ OKX failed: {e}")
+        return None
+
+def fetch_recent_klines(limit=100):
+    """
+    Try multiple APIs with fallback
+    """
+    log(f"Fetching {limit} most recent hourly candles...")
+    
+    # Try APIs in order of preference
+    apis = [
+        ("Bybit", fetch_from_bybit),
+        ("OKX", fetch_from_okx),
+        ("CryptoCompare", fetch_from_cryptocompare),
+    ]
+    
+    for name, fetch_func in apis:
+        df = fetch_func(limit)
+        if df is not None and len(df) > 0:
+            log(f"✓ Successfully fetched data from {name}")
+            return df
+    
+    log("❌ All APIs failed")
+    return None
 
 def update_csv():
     """Main function to update CSV with latest data"""
@@ -115,7 +269,7 @@ def update_csv():
     df_new = fetch_recent_klines(limit=LIMIT)
     
     if df_new is None or len(df_new) == 0:
-        log("❌ Failed to fetch new data from API")
+        log("❌ Failed to fetch new data from any API")
         return False
     
     # Combine with existing data
@@ -159,6 +313,8 @@ def main():
             sys.exit(1)
     except Exception as e:
         log(f"❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
