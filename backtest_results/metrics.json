@@ -5,19 +5,19 @@
     "Trades": 1239,
     "Win_rate_pct": 28.0,
     "Win_Loss_ratio": 3.0,
-    "Cum_return_pct": 1447.0,
+    "Cum_return_pct": 1445.0,
     "Max_DD_pct": 11.0,
     "Max_consec_losses": 25,
     "Max_consec_wins": 7,
-    "Win_rate_30d_pct": 36.0,
+    "Win_rate_30d_pct": 32.0,
     "Trades_30d": 25,
-    "PnL_30d": -11139.0,
-    "Win_rate_7d_pct": 40.0,
+    "PnL_30d": -12583.0,
+    "Win_rate_7d_pct": 20.0,
     "Trades_7d": 5,
-    "PnL_7d": -10922.0,
-    "Win_rate_3m_pct": 34.0,
+    "PnL_7d": -12366.0,
+    "Win_rate_3m_pct": 31.0,
     "Trades_3m": 29,
-    "PnL_3m": -12741.0
+    "PnL_3m": -14185.0
   },
   "live_position": null,
   "equity_curve": [
@@ -520,8 +520,8 @@
     1547480.4395598674,
     1551141.9429970605,
     1546141.9429970605,
-    1546558.3654481475
+    1545114.8420453174
   ],
-  "last_updated": "2026-01-28 15:46:22 UTC",
-  "data_latest_timestamp": "2026-01-28 23:00:00"
+  "last_updated": "2026-01-28 16:53:06 UTC",
+  "data_latest_timestamp": "2026-01-29 00:00:00"
 }
